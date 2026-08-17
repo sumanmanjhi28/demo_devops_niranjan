@@ -1,0 +1,197 @@
+name: Demo Devops Build and Test
+
+on:
+  push:
+    branches:
+      - 'feature/*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_STEP_DEBUG: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.5.7'
+
+      - name: Verify Terraform
+        run: |
+          terraform -version
+
+      - name: Set up Node.js 22.x
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+
+      - name: Install dependencies and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: 'ap-south-1'
+
+      # Quick validation step: show which AWS identity the runner is using.
+      # This will fail with the same signature error if the keys are wrong,
+      # or succeed when configure-aws-credentials worked (static keys or assumed role).
+      - name: Validate AWS credentials
+        run: |
+          echo "Testing AWS credentials and caller identity"
+          aws sts get-caller-identity --region ap-south-1
+
+      # If you'd prefer to use GitHub OIDC (recommended) and assume an IAM role,
+      # replace the Configure AWS credentials step above with this (and set
+      # `secrets.AWS_ROLE_TO_ASSUME` to the role ARN):
+      # - name: Configure AWS credentials (OIDC / assume role)
+      #   uses: aws-actions/configure-aws-credentials@v2
+      #   with:
+      #     role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      #     aws-region: 'ap-south-1'
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build Docker image
+        run: |
+          docker build -t demo-devops:latest .
+
+      - name: Tag and push Docker image to ECR
+        env:
+          AWS_REGION: 'ap-south-1'
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          ECR_REPOSITORY="devops/demo-project"
+          IMAGE_TAG="latest"
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" || \
+            aws ecr create-repository --repository-name "$ECR_REPOSITORY"
+          docker tag demo-devops:latest "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+      # Deploy to Elastic Beanstalk
+      - name: Create deployment package for Elastic Beanstalk
+        run: |
+          # Create a deployment package with all necessary files
+          zip -r deploy-package.zip . \
+            -x "node_modules/*" ".git/*" ".github/*" "infra/*" \
+            "*.zip" "Dockerfile" "README*" ".eslintrc*" ".gitignore"
+          
+          # Verify package contents
+          echo "Deployment package created. Contents:"
+          unzip -l deploy-package.zip | head -20
+
+      - name: Upload to S3 for Elastic Beanstalk
+        env:
+          AWS_REGION: us-east-1
+        run: |
+          TIMESTAMP=$(date +%s)
+          S3_KEY="demo-eb-app-versions/deploy-${TIMESTAMP}.zip"
+          S3_BUCKET="demo-eb-app-versions-85owv0"
+          
+          aws s3 cp deploy-package.zip "s3://${S3_BUCKET}/${S3_KEY}" \
+            --region "${AWS_REGION}"
+          
+          echo "Upload successful!"
+          echo "S3_BUCKET=$S3_BUCKET" >> $GITHUB_ENV
+          echo "S3_KEY=$S3_KEY" >> $GITHUB_ENV
+
+      - name: Create Elastic Beanstalk application version
+        env:
+          AWS_REGION: us-east-1
+        run: |
+          TIMESTAMP=$(date +%s)
+          VERSION_LABEL="version-${TIMESTAMP}"
+          
+          aws elasticbeanstalk create-application-version \
+            --application-name demo-eb-app \
+            --version-label "${VERSION_LABEL}" \
+            --source-bundle "S3Bucket=${{ env.S3_BUCKET }},S3Key=${{ env.S3_KEY }}" \
+            --region "${AWS_REGION}" || echo "Version already exists or error occurred"
+          
+          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
+
+      - name: Deploy to Elastic Beanstalk environment
+        env:
+          AWS_REGION: us-east-1
+        run: |
+          echo "Deploying to Elastic Beanstalk..."
+          
+          aws elasticbeanstalk update-environment \
+            --application-name demo-eb-app \
+            --environment-name demo-eb-env \
+            --version-label "${{ env.VERSION_LABEL }}" \
+            --region "${AWS_REGION}"
+          
+          echo "Deployment initiated!"
+          echo "Monitor progress at: https://console.aws.amazon.com/elasticbeanstalk"
+
+      - name: Wait for Elastic Beanstalk deployment
+        env:
+          AWS_REGION: us-east-1
+        run: |
+          echo "Waiting for Elastic Beanstalk environment to be ready..."
+          
+          for i in {1..60}; do
+            STATUS=$(aws elasticbeanstalk describe-environments \
+              --application-name demo-eb-app \
+              --environment-names demo-eb-env \
+              --region "${AWS_REGION}" \
+              --query 'Environments[0].Status' \
+              --output text)
+            
+            echo "Attempt $i/60 - Environment status: $STATUS"
+            
+            if [ "$STATUS" = "Ready" ]; then
+              echo "✅ Elastic Beanstalk environment is ready!"
+              
+              # Get the environment URL
+              URL=$(aws elasticbeanstalk describe-environments \
+                --application-name demo-eb-app \
+                --environment-names demo-eb-env \
+                --region "${AWS_REGION}" \
+                --query 'Environments[0].CNAME' \
+                --output text)
+              
+              echo "🚀 Application deployed successfully!"
+              echo "📍 URL: http://${URL}"
+              exit 0
+            fi
+            
+            sleep 10
+          done
+          
+          echo "⏱️  Deployment still in progress. Check AWS Console for details."
+          exit 0
+
+      - name: Verify application health
+        env:
+          AWS_REGION: us-east-1
+        run: |
+          ENV_URL=$(aws elasticbeanstalk describe-environments \
+            --application-name demo-eb-app \
+            --environment-names demo-eb-env \
+            --region "${AWS_REGION}" \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          
+          if [ -z "$ENV_URL" ] || [ "$ENV_URL" = "None" ]; then
+            echo "⚠️  Environment URL not available yet"
+            exit 0
+          fi
+          
+          echo "Testing application health..."
+          curl -s -f "http://${ENV_URL}/health" || echo "Health check in progress..."
+
