@@ -199,7 +199,7 @@ resource "aws_elastic_beanstalk_application" "main" {
 resource "aws_elastic_beanstalk_environment" "main" {
   name                = "${var.app_name}-${var.env_name}"
   application         = aws_elastic_beanstalk_application.main.name
-  solution_stack_name = "64bit Amazon Linux 2 v5.9.8 running Node.js 18"
+  solution_stack_name = "64bit Amazon Linux 2023 v6.11.6 running Node.js 22"
   tier                = "WebServer"
 
   # VPC Configuration
