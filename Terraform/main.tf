@@ -198,24 +198,47 @@ resource "aws_elastic_beanstalk_application" "main" {
 # Elastic Beanstalk Environment
 resource "aws_elastic_beanstalk_environment" "main" {
   name                = "${var.app_name}-${var.env_name}"
-  application         =  aws_elastic_beanstalk_application.main.name
+  application         = aws_elastic_beanstalk_application.main.name
   solution_stack_name = "64bit Amazon Linux 2023 v6.0.4 running Node.js 22"
   tier                = "WebServer"
-  instance_type       = var.instance_type
 
   # VPC Configuration
-  vpc_id            = aws_vpc.main.id
-  subnets           = [aws_subnet.public.id]
-  security_groups   = [aws_security_group.eb.id]
-  
-  # IAM Configuration
-  service_role_arn = aws_iam_role.eb_service_role.arn
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "VPCId"
+    value     = aws_vpc.main.id
+  }
+
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "Subnets"
+    value     = aws_subnet.public.id
+  }
+
+  setting {
+    namespace = "aws:autoscaling:launchconfiguration"
+    name      = "SecurityGroups"
+    value     = aws_security_group.eb.id
+  }
+
+  # Service Role
+  setting {
+    namespace = "aws:elasticbeanstalk:environment"
+    name      = "ServiceRole"
+    value     = aws_iam_role.eb_service_role.arn
+  }
 
   # Instance Configuration
   setting {
     namespace = "aws:autoscaling:launchconfiguration"
     name      = "IamInstanceProfile"
     value     = aws_iam_instance_profile.eb_profile.arn
+  }
+
+  setting {
+    namespace = "aws:autoscaling:launchconfiguration"
+    name      = "InstanceType"
+    value     = var.instance_type
   }
 
   # Auto Scaling
@@ -231,7 +254,7 @@ resource "aws_elastic_beanstalk_environment" "main" {
     value     = var.max_size
   }
 
-  # Load Balancer
+  # CloudWatch Logs
   setting {
     namespace = "aws:elasticbeanstalk:cloudwatch:logs"
     name      = "StreamLogs"
@@ -248,10 +271,10 @@ resource "aws_elastic_beanstalk_environment" "main" {
   setting {
     namespace = "aws:elasticbeanstalk:healthreporting:system"
     name      = "SystemType"
-    value     = "EnhancedHealthReporting"
+    value     = "enhanced"
   }
 
-  # Application port
+  # Application Environment Variable
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "NODE_ENV"

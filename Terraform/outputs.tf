@@ -1,6 +1,6 @@
 output "elastic_beanstalk_app_name" {
   description = "Elastic Beanstalk application name"
-  value       = aws_elastic_beanstalk_app.main.name
+  value       = aws_elastic_beanstalk_application.main.name
 }
 
 output "elastic_beanstalk_environment_name" {
@@ -77,7 +77,7 @@ output "github_actions_setup_guide" {
          Value: ${aws_iam_access_key.github_actions.secret}
     3. Update your GitHub Actions workflow with:
        - aws-region: ${var.aws_region}
-       - application-name: ${aws_elastic_beanstalk_app.main.name}
+       - application-name: ${aws_elastic_beanstalk_application.main.name}
        - environment-name: ${aws_elastic_beanstalk_environment.main.name}
        - S3_BUCKET: ${aws_s3_bucket.eb_deployment.bucket}
   EOT
