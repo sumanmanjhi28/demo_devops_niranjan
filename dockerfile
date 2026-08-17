@@ -1,5 +1,3 @@
-FROM "node:22"
-A
 FROM node:22-alpine
 
 # Set working directory
@@ -15,4 +13,3 @@ COPY . .
 # Expose port and run the server
 EXPOSE 3000
 CMD ["node", "server.js"]
-A
