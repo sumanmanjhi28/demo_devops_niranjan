@@ -198,7 +198,7 @@ resource "aws_elastic_beanstalk_application" "main" {
 # Elastic Beanstalk Environment
 resource "aws_elastic_beanstalk_environment" "main" {
   name                = "${var.app_name}-${var.env_name}"
-  application         = aws_elastic_beanstalk_app.main.name
+  application         =  aws_elastic_beanstalk_application.main.name
   solution_stack_name = "64bit Amazon Linux 2023 v6.0.4 running Node.js 22"
   tier                = "WebServer"
   instance_type       = var.instance_type
