@@ -81,4 +81,5 @@ output "github_actions_setup_guide" {
        - environment-name: ${aws_elastic_beanstalk_environment.main.name}
        - S3_BUCKET: ${aws_s3_bucket.eb_deployment.bucket}
   EOT
+  sensitive = true
 }
