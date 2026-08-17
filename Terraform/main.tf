@@ -143,7 +143,7 @@ resource "aws_iam_role_policy_attachment" "eb_multicontainer_docker" {
 
 resource "aws_iam_role_policy_attachment" "cloudwatch_logs" {
   role       = aws_iam_role.eb_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchLogsAgentServerPolicy"
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
 resource "aws_iam_role_policy_attachment" "ssm_access" {
@@ -199,7 +199,7 @@ resource "aws_elastic_beanstalk_application" "main" {
 resource "aws_elastic_beanstalk_environment" "main" {
   name                = "${var.app_name}-${var.env_name}"
   application         = aws_elastic_beanstalk_application.main.name
-  solution_stack_name = "64bit Amazon Linux 2023 v6.0.4 running Node.js 22"
+  solution_stack_name = "64bit Amazon Linux 2 v5.9.8 running Node.js 18"
   tier                = "WebServer"
 
   # VPC Configuration
