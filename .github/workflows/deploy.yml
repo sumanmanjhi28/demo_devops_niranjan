@@ -24,15 +24,20 @@ on:
 env:
   AWS_REGION: us-east-1
   TF_WORKING_DIR: ./Terraform
-  EB_APP_NAME: demo-eb-app
-  EB_ENV_NAME: demo-eb-env
-  S3_BUCKET: demo-eb-app-versions-85owv0
+  EB_APP_NAME: demo-devops
+  EB_ENV_NAME: demo-devops-dev
+  S3_BUCKET: demo-devops-dev-deployment-284874841655
 
 jobs:
   terraform:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      eb_app: ${{ steps.tf-outputs.outputs.eb_app }}
+      eb_env: ${{ steps.tf-outputs.outputs.eb_env }}
+      s3_bucket: ${{ steps.tf-outputs.outputs.s3_bucket }}
+      eb_url: ${{ steps.tf-outputs.outputs.eb_url }}
 
     steps:
       - name: Checkout code
@@ -64,13 +69,23 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform apply -auto-approve tfplan
 
+      - name: Get Terraform Outputs
+        if: github.event_name == 'push' || github.event.inputs.action == 'apply'
+        id: tf-outputs
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          echo "eb_app=$(terraform output -raw elastic_beanstalk_app_name)" >> $GITHUB_OUTPUT
+          echo "eb_env=$(terraform output -raw elastic_beanstalk_environment_name)" >> $GITHUB_OUTPUT
+          echo "s3_bucket=$(terraform output -raw s3_bucket_name)" >> $GITHUB_OUTPUT
+          echo "eb_url=$(terraform output -raw elastic_beanstalk_environment_url)" >> $GITHUB_OUTPUT
+
       - name: Terraform destroy
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform destroy -auto-approve
 
   app-deploy:
-    if: github.event_name == 'push' || github.event.inputs.action == 'apply'
+    if: (github.event_name == 'push' || github.event.inputs.action == 'apply') && (github.event.inputs.deploy_app == 'true' || github.event_name == 'push')
     needs: terraform
     runs-on: ubuntu-latest
     permissions:
@@ -79,6 +94,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set EB values from Terraform outputs
+        id: eb-config
+        run: |
+          echo "EB_APP_NAME=${{ needs.terraform.outputs.eb_app || env.EB_APP_NAME }}" >> $GITHUB_ENV
+          echo "EB_ENV_NAME=${{ needs.terraform.outputs.eb_env || env.EB_ENV_NAME }}" >> $GITHUB_ENV
+          echo "S3_BUCKET=${{ needs.terraform.outputs.s3_bucket || env.S3_BUCKET }}" >> $GITHUB_ENV
 
       - name: Set up Node.js 22.x
         uses: actions/setup-node@v4
@@ -126,7 +148,7 @@ jobs:
         id: s3-upload
         run: |
           TIMESTAMP=$(date +%s)
-          S3_KEY="demo-eb-app-versions/deploy-${TIMESTAMP}.zip"
+          S3_KEY="application-versions/deploy-${TIMESTAMP}.zip"
           aws s3 cp deploy-package.zip "s3://${S3_BUCKET}/${S3_KEY}" --region "${AWS_REGION}"
           echo "s3_key=${S3_KEY}" >> $GITHUB_OUTPUT
 
