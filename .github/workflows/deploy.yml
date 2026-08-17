@@ -23,7 +23,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  TF_WORKING_DIR: ./terraform
+  TF_WORKING_DIR: ./Terraform
   EB_APP_NAME: demo-eb-app
   EB_ENV_NAME: demo-eb-env
   S3_BUCKET: demo-eb-app-versions-85owv0
