@@ -1,0 +1,175 @@
+name: Terraform Infra + Elastic Beanstalk Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - release/*
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Select whether to apply or destroy Terraform infrastructure
+        required: true
+        default: apply
+        type: choice
+        options:
+          - apply
+          - destroy
+      deploy_app:
+        description: Deploy app after Terraform apply
+        required: false
+        default: true
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: ./terraform
+  EB_APP_NAME: demo-eb-app
+  EB_ENV_NAME: demo-eb-env
+  S3_BUCKET: demo-eb-app-versions-85owv0
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.7
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform plan
+        if: github.event_name == 'push' || github.event.inputs.action == 'apply'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform plan -out=tfplan
+
+      - name: Terraform apply
+        if: github.event_name == 'push' || github.event.inputs.action == 'apply'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform destroy
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform destroy -auto-approve
+
+  app-deploy:
+    if: github.event_name == 'push' || github.event.inputs.action == 'apply'
+    needs: terraform
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate AWS credentials
+        run: |
+          echo "AWS Account: $(aws sts get-caller-identity --query 'Account' --output text)"
+          echo "AWS User: $(aws sts get-caller-identity --query 'Arn' --output text)"
+
+      - name: Create deployment package
+        if: ${{ github.event_name == 'push' || github.event.inputs.deploy_app == 'true' }}
+        run: |
+          zip -r deploy-package.zip . \
+            -x "node_modules/*" \
+                ".git/*" \
+                ".github/*" \
+                "terraform/*" \
+                ".gitignore" \
+                "*.zip" \
+                "Dockerfile" \
+                "README*" \
+                ".eslintrc*" \
+                ".DS_Store" \
+                "*.log"
+          echo "Deployment package created"
+          ls -lh deploy-package.zip
+
+      - name: Upload package to S3
+        if: ${{ github.event_name == 'push' || github.event.inputs.deploy_app == 'true' }}
+        id: s3-upload
+        run: |
+          TIMESTAMP=$(date +%s)
+          S3_KEY="demo-eb-app-versions/deploy-${TIMESTAMP}.zip"
+          aws s3 cp deploy-package.zip "s3://${S3_BUCKET}/${S3_KEY}" --region "${AWS_REGION}"
+          echo "s3_key=${S3_KEY}" >> $GITHUB_OUTPUT
+
+      - name: Create Elastic Beanstalk application version
+        if: ${{ github.event_name == 'push' || github.event.inputs.deploy_app == 'true' }}
+        id: eb-version
+        run: |
+          TIMESTAMP=$(date +%s)
+          VERSION_LABEL="v-$(git rev-parse --short HEAD)-${TIMESTAMP}"
+          aws elasticbeanstalk create-application-version \
+            --application-name "${EB_APP_NAME}" \
+            --version-label "${VERSION_LABEL}" \
+            --source-bundle "S3Bucket=${S3_BUCKET},S3Key=${{ steps.s3-upload.outputs.s3_key }}" \
+            --description "Deployment from commit $(git rev-parse --short HEAD)" \
+            --region "${AWS_REGION}" || echo "Version may already exist; continuing."
+          echo "version_label=${VERSION_LABEL}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to Elastic Beanstalk
+        if: ${{ github.event_name == 'push' || github.event.inputs.deploy_app == 'true' }}
+        run: |
+          aws elasticbeanstalk update-environment \
+            --application-name "${EB_APP_NAME}" \
+            --environment-name "${EB_ENV_NAME}" \
+            --version-label "${{ steps.eb-version.outputs.version_label }}" \
+            --region "${AWS_REGION}"
+          echo "Elastic Beanstalk deployment started"
+
+      - name: Wait for deployment
+        if: ${{ github.event_name == 'push' || github.event.inputs.deploy_app == 'true' }}
+        run: |
+          echo "Waiting for Elastic Beanstalk to report Ready..."
+          for i in {1..60}; do
+            STATUS=$(aws elasticbeanstalk describe-environments \
+              --application-name "${EB_APP_NAME}" \
+              --environment-names "${EB_ENV_NAME}" \
+              --region "${AWS_REGION}" \
+              --query 'Environments[0].Status' \
+              --output text)
+            echo "Attempt $i: ${STATUS}"
+            if [ "$STATUS" = "Ready" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Deployment still processing; check AWS Console."
+          exit 0
