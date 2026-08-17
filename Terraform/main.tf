@@ -188,7 +188,7 @@ resource "aws_iam_role_policy_attachment" "eb_service_basic" {
 }
 
 # Elastic Beanstalk Application
-resource "aws_elastic_beanstalk_app" "main" {
+resource "aws_elastic_beanstalk_application" "main" {
   name        = var.app_name
   description = "Demo DevOps Application"
 
