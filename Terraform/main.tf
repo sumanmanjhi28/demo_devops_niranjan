@@ -299,7 +299,8 @@ resource "aws_cloudwatch_log_group" "eb" {
 
 # S3 Bucket for Elastic Beanstalk Deployments
 resource "aws_s3_bucket" "eb_deployment" {
-  bucket = "${var.app_name}-${var.env_name}-deployment-${data.aws_caller_identity.current.account_id}"
+  bucket        = "${var.app_name}-${var.env_name}-deployment-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
 
   tags = merge(
     var.tags,

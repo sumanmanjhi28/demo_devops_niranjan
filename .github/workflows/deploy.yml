@@ -79,6 +79,40 @@ jobs:
           echo "s3_bucket=$(terraform output -raw s3_bucket_name)" >> $GITHUB_OUTPUT
           echo "eb_url=$(terraform output -raw elastic_beanstalk_environment_url)" >> $GITHUB_OUTPUT
 
+      - name: Empty S3 buckets before destroy
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          echo "Emptying deployment S3 bucket..."
+          BUCKET_NAME="${{ env.S3_BUCKET }}"
+          
+          # Check if bucket exists
+          if aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Bucket exists, emptying..."
+            
+            # Delete all objects
+            aws s3 rm "s3://$BUCKET_NAME" --recursive --region ${{ env.AWS_REGION }} || true
+            
+            # Delete all object versions if versioning is enabled
+            aws s3api delete-objects \
+              --bucket "$BUCKET_NAME" \
+              --delete "$(aws s3api list-object-versions \
+                --bucket "$BUCKET_NAME" \
+                --output=json \
+                --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}' 2>/dev/null || echo '{}')" 2>/dev/null || true
+            
+            # Delete all delete markers
+            aws s3api delete-objects \
+              --bucket "$BUCKET_NAME" \
+              --delete "$(aws s3api list-object-versions \
+                --bucket "$BUCKET_NAME" \
+                --output=json \
+                --query='{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' 2>/dev/null || echo '{}')" 2>/dev/null || true
+            
+            echo "Bucket emptied successfully"
+          else
+            echo "Bucket does not exist or already deleted"
+          fi
+
       - name: Terraform destroy
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
         working-directory: ${{ env.TF_WORKING_DIR }}
