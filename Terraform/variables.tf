@@ -43,7 +43,7 @@ variable "desired_size" {
 variable "eks_version" {
   description = "EKS cluster version"
   type        = string
-  default     = "1.28"
+  default     = "1.31"
 }
 
 variable "vpc_cidr" {
