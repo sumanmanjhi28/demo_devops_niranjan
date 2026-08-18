@@ -187,40 +187,103 @@ jobs:
           echo "Cleaning up Kubernetes resources..."
           echo "========================================="
           
-          # Try to connect to EKS cluster
-          if aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
-            echo "Updating kubeconfig..."
-            aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
-            
-            echo "Deleting LoadBalancer service (releases AWS Load Balancer)..."
-            kubectl delete service demo-devops-service -n default --ignore-not-found=true --timeout=5m
-            
-            echo "Deleting deployment..."
-            kubectl delete deployment demo-devops-app -n default --ignore-not-found=true --timeout=2m
-            
-            echo ""
-            echo "Waiting for AWS Load Balancer to be fully released..."
-            echo "This is necessary to allow Terraform to destroy VPC resources..."
-            
-            # Wait up to 3 minutes for load balancer to be deleted
-            for i in {1..36}; do
-              LB_COUNT=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='vpc-0f9dc44898df8fe19'] | length(@)" --output text 2>/dev/null || echo "0")
-              CLB_COUNT=$(aws elb describe-load-balancers --query "LoadBalancerDescriptions[?VPCId=='vpc-0f9dc44898df8fe19'] | length(@)" --output text 2>/dev/null || echo "0")
-              
-              if [ "$LB_COUNT" = "0" ] && [ "$CLB_COUNT" = "0" ]; then
-                echo "✓ Load Balancer fully released!"
-                break
-              fi
-              
-              echo "  Waiting... (attempt $i/36) - LBs remaining: $((LB_COUNT + CLB_COUNT))"
-              sleep 5
-            done
-            
-            echo "✓ Kubernetes resources cleaned up"
-          else
-            echo "⚠️  EKS cluster not found or already deleted, skipping k8s cleanup"
+          # Get VPC ID first
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=demo-devops-vpc" --query "Vpcs[0].VpcId" --output text 2>/dev/null || echo "")
+          
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            echo "⚠️  VPC not found, skipping cleanup"
+            exit 0
           fi
           
+          echo "Found VPC: $VPC_ID"
+          echo ""
+          
+          # Try to connect to EKS cluster and delete k8s resources
+          if aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "Step 1: Deleting Kubernetes resources..."
+            aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+            
+            # Delete LoadBalancer service (this triggers AWS LB deletion)
+            kubectl delete service demo-devops-service -n default --ignore-not-found=true --timeout=5m || true
+            
+            # Delete deployment
+            kubectl delete deployment demo-devops-app -n default --ignore-not-found=true --timeout=2m || true
+            
+            echo "✓ Kubernetes resources deleted"
+          else
+            echo "⚠️  EKS cluster not accessible, will clean AWS resources directly"
+          fi
+          
+          echo ""
+          echo "Step 2: Cleaning up AWS Load Balancers..."
+          
+          # Delete Application/Network Load Balancers
+          ALB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='${VPC_ID}'].LoadBalancerArn" --output text 2>/dev/null || echo "")
+          if [ ! -z "$ALB_ARNS" ]; then
+            for ARN in $ALB_ARNS; do
+              echo "  Deleting ALB/NLB: $ARN"
+              aws elbv2 delete-load-balancer --load-balancer-arn "$ARN" 2>/dev/null || true
+            done
+          fi
+          
+          # Delete Classic Load Balancers
+          CLB_NAMES=$(aws elb describe-load-balancers --query "LoadBalancerDescriptions[?VPCId=='${VPC_ID}'].LoadBalancerName" --output text 2>/dev/null || echo "")
+          if [ ! -z "$CLB_NAMES" ]; then
+            for NAME in $CLB_NAMES; do
+              echo "  Deleting Classic LB: $NAME"
+              aws elb delete-load-balancer --load-balancer-name "$NAME" 2>/dev/null || true
+            done
+          fi
+          
+          if [ -z "$ALB_ARNS" ] && [ -z "$CLB_NAMES" ]; then
+            echo "  No load balancers found"
+          else
+            echo "  Load balancers deletion initiated"
+          fi
+          
+          echo ""
+          echo "Step 3: Waiting for Load Balancers and ENIs to be released..."
+          
+          # Wait for load balancers and network interfaces to be fully deleted
+          for i in {1..60}; do
+            # Check ALB/NLB
+            ALB_COUNT=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='${VPC_ID}'] | length(@)" --output text 2>/dev/null || echo "0")
+            
+            # Check Classic LB
+            CLB_COUNT=$(aws elb describe-load-balancers --query "LoadBalancerDescriptions[?VPCId=='${VPC_ID}'] | length(@)" --output text 2>/dev/null || echo "0")
+            
+            # Check network interfaces
+            ENI_COUNT=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=${VPC_ID}" "Name=description,Values=ELB*" --query "length(NetworkInterfaces)" --output text 2>/dev/null || echo "0")
+            
+            TOTAL=$((ALB_COUNT + CLB_COUNT + ENI_COUNT))
+            
+            if [ "$TOTAL" = "0" ]; then
+              echo "✓ All Load Balancers and ENIs released!"
+              break
+            fi
+            
+            echo "  Waiting... (attempt $i/60) - Resources remaining: LBs=$((ALB_COUNT + CLB_COUNT)), ENIs=$ENI_COUNT"
+            sleep 5
+          done
+          
+          echo ""
+          echo "Step 4: Cleaning up Kubernetes-created security groups..."
+          
+          # Delete security groups created by Kubernetes (k8s-elb-*)
+          K8S_SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${VPC_ID}" "Name=group-name,Values=k8s-elb-*" --query "SecurityGroups[].GroupId" --output text 2>/dev/null || echo "")
+          
+          if [ ! -z "$K8S_SGS" ]; then
+            for SG_ID in $K8S_SGS; do
+              echo "  Deleting security group: $SG_ID"
+              aws ec2 delete-security-group --group-id "$SG_ID" 2>/dev/null || true
+            done
+            echo "✓ Kubernetes security groups deleted"
+          else
+            echo "  No Kubernetes security groups found"
+          fi
+          
+          echo ""
+          echo "✓ Cleanup complete!"
           echo "========================================="
 
       - name: Terraform destroy
