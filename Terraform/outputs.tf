@@ -1,21 +1,36 @@
-output "elastic_beanstalk_app_name" {
-  description = "Elastic Beanstalk application name"
-  value       = aws_elastic_beanstalk_application.main.name
+output "eks_cluster_name" {
+  description = "EKS cluster name"
+  value       = aws_eks_cluster.main.name
 }
 
-output "elastic_beanstalk_environment_name" {
-  description = "Elastic Beanstalk environment name"
-  value       = aws_elastic_beanstalk_environment.main.name
+output "eks_cluster_endpoint" {
+  description = "EKS cluster endpoint"
+  value       = aws_eks_cluster.main.endpoint
 }
 
-output "elastic_beanstalk_endpoint" {
-  description = "Elastic Beanstalk environment endpoint (CNAME)"
-  value       = aws_elastic_beanstalk_environment.main.endpoint_url
+output "eks_cluster_security_group_id" {
+  description = "Security group ID attached to the EKS cluster"
+  value       = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
 }
 
-output "elastic_beanstalk_environment_url" {
-  description = "Full URL to access the application"
-  value       = "http://${aws_elastic_beanstalk_environment.main.endpoint_url}"
+output "eks_cluster_version" {
+  description = "EKS cluster version"
+  value       = aws_eks_cluster.main.version
+}
+
+output "eks_node_group_id" {
+  description = "EKS node group ID"
+  value       = aws_eks_node_group.main.id
+}
+
+output "ecr_repository_url" {
+  description = "ECR repository URL"
+  value       = aws_ecr_repository.app.repository_url
+}
+
+output "ecr_repository_name" {
+  description = "ECR repository name"
+  value       = aws_ecr_repository.app.name
 }
 
 output "vpc_id" {
@@ -23,34 +38,19 @@ output "vpc_id" {
   value       = aws_vpc.main.id
 }
 
-output "public_subnet_id" {
-  description = "Public subnet ID"
-  value       = aws_subnet.public.id
+output "public_subnet_ids" {
+  description = "Public subnet IDs"
+  value       = aws_subnet.public[*].id
 }
 
-output "security_group_id" {
-  description = "Security group ID for Elastic Beanstalk"
-  value       = aws_security_group.eb.id
+output "private_subnet_ids" {
+  description = "Private subnet IDs"
+  value       = aws_subnet.private[*].id
 }
 
 output "cloudwatch_log_group" {
   description = "CloudWatch log group name"
-  value       = aws_cloudwatch_log_group.eb.name
-}
-
-output "s3_bucket_name" {
-  description = "S3 bucket name for deployments"
-  value       = aws_s3_bucket.eb_deployment.bucket
-}
-
-output "s3_bucket_arn" {
-  description = "S3 bucket ARN for deployments"
-  value       = aws_s3_bucket.eb_deployment.arn
-}
-
-output "s3_bucket_region" {
-  description = "S3 bucket region"
-  value       = aws_s3_bucket.eb_deployment.region
+  value       = aws_cloudwatch_log_group.eks.name
 }
 
 # GitHub Actions Credentials
@@ -66,6 +66,11 @@ output "github_actions_secret_access_key" {
   sensitive   = true
 }
 
+output "configure_kubectl" {
+  description = "Command to configure kubectl"
+  value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${aws_eks_cluster.main.name}"
+}
+
 output "github_actions_setup_guide" {
   description = "Instructions for setting up GitHub Actions secrets"
   value = <<-EOT
@@ -75,11 +80,10 @@ output "github_actions_setup_guide" {
          Value: ${aws_iam_access_key.github_actions.id}
        - Name: AWS_SECRET_ACCESS_KEY
          Value: ${aws_iam_access_key.github_actions.secret}
-    3. Update your GitHub Actions workflow with:
-       - aws-region: ${var.aws_region}
-       - application-name: ${aws_elastic_beanstalk_application.main.name}
-       - environment-name: ${aws_elastic_beanstalk_environment.main.name}
-       - S3_BUCKET: ${aws_s3_bucket.eb_deployment.bucket}
+    3. Your EKS cluster details:
+       - Cluster: ${aws_eks_cluster.main.name}
+       - ECR Repository: ${aws_ecr_repository.app.repository_url}
+       - Region: ${var.aws_region}
   EOT
   sensitive = true
 }

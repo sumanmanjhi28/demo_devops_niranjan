@@ -1,3 +1,10 @@
+# ========================================
+# EKS CLUSTER INFRASTRUCTURE
+# ========================================
+
+# Data source to get current AWS account ID
+data "aws_caller_identity" "current" {}
+
 # VPC
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
@@ -6,7 +13,10 @@ resource "aws_vpc" "main" {
 
   tags = merge(
     var.tags,
-    { Name = "${var.app_name}-vpc" }
+    {
+      Name                                        = "${var.app_name}-vpc"
+      "kubernetes.io/cluster/${var.app_name}-eks" = "shared"
+    }
   )
 }
 
@@ -20,28 +30,38 @@ resource "aws_internet_gateway" "main" {
   )
 }
 
-# Public Subnet
+# Public Subnets (for Load Balancer)
 resource "aws_subnet" "public" {
+  count                   = 2
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[0]
+  cidr_block              = "10.0.${count.index + 1}.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
   map_public_ip_on_launch = true
 
   tags = merge(
     var.tags,
-    { Name = "${var.app_name}-public-subnet" }
+    {
+      Name                                        = "${var.app_name}-public-subnet-${count.index + 1}"
+      "kubernetes.io/role/elb"                    = "1"
+      "kubernetes.io/cluster/${var.app_name}-eks" = "shared"
+    }
   )
 }
 
-# Private Subnet (optional, for databases)
+# Private Subnets (for EKS worker nodes)
 resource "aws_subnet" "private" {
+  count             = 2
   vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.2.0/24"
-  availability_zone = data.aws_availability_zones.available.names[1]
+  cidr_block        = "10.0.${count.index + 10}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
 
   tags = merge(
     var.tags,
-    { Name = "${var.app_name}-private-subnet" }
+    {
+      Name                                        = "${var.app_name}-private-subnet-${count.index + 1}"
+      "kubernetes.io/role/internal-elb"           = "1"
+      "kubernetes.io/cluster/${var.app_name}-eks" = "shared"
+    }
   )
 }
 
@@ -55,8 +75,8 @@ resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
   route {
-    cidr_block      = "0.0.0.0/0"
-    gateway_id      = aws_internet_gateway.main.id
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
   }
 
   tags = merge(
@@ -65,37 +85,69 @@ resource "aws_route_table" "public" {
   )
 }
 
+# Route Table for Private Subnets
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = merge(
+    var.tags,
+    { Name = "${var.app_name}-private-rt" }
+  )
+}
+
+# NAT Gateway EIP
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = merge(
+    var.tags,
+    { Name = "${var.app_name}-nat-eip" }
+  )
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# NAT Gateway
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+
+  tags = merge(
+    var.tags,
+    { Name = "${var.app_name}-nat-gateway" }
+  )
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# Route Table Associations - Public
 resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
+  count          = 2
+  subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
 
-# Security Group for Elastic Beanstalk
-resource "aws_security_group" "eb" {
-  name        = "${var.app_name}-eb-sg"
-  description = "Security group for Elastic Beanstalk"
+# Route Table Associations - Private
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+# ========================================
+# EKS CLUSTER
+# ========================================
+
+# Security Group for EKS Cluster
+resource "aws_security_group" "eks_cluster" {
+  name        = "${var.app_name}-eks-cluster-sg"
+  description = "Security group for EKS cluster"
   vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   egress {
     from_port   = 0
@@ -106,13 +158,48 @@ resource "aws_security_group" "eb" {
 
   tags = merge(
     var.tags,
-    { Name = "${var.app_name}-eb-sg" }
+    { Name = "${var.app_name}-eks-cluster-sg" }
   )
 }
 
-# IAM Role for EC2 instances
-resource "aws_iam_role" "eb_instance_role" {
-  name = "${var.app_name}-eb-instance-role"
+# ========================================
+# IAM ROLES FOR EKS
+# ========================================
+
+# IAM Role for EKS Cluster
+resource "aws_iam_role" "eks_cluster" {
+  name = "${var.app_name}-eks-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+# Attach policies to EKS cluster role
+resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.eks_cluster.name
+}
+
+resource "aws_iam_role_policy_attachment" "eks_vpc_resource_controller" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
+  role       = aws_iam_role.eks_cluster.name
+}
+
+# IAM Role for EKS Node Group
+resource "aws_iam_role" "eks_nodes" {
+  name = "${var.app_name}-eks-node-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -130,263 +217,117 @@ resource "aws_iam_role" "eb_instance_role" {
   tags = var.tags
 }
 
-# Attach policies to EC2 role
-resource "aws_iam_role_policy_attachment" "eb_worker" {
-  role       = aws_iam_role.eb_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier"
+# Attach policies to node role
+resource "aws_iam_role_policy_attachment" "eks_worker_node_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.eks_nodes.name
 }
 
-resource "aws_iam_role_policy_attachment" "eb_multicontainer_docker" {
-  role       = aws_iam_role.eb_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker"
+resource "aws_iam_role_policy_attachment" "eks_cni_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.eks_nodes.name
 }
 
-resource "aws_iam_role_policy_attachment" "cloudwatch_logs" {
-  role       = aws_iam_role.eb_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+resource "aws_iam_role_policy_attachment" "eks_container_registry_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.eks_nodes.name
 }
 
-resource "aws_iam_role_policy_attachment" "ssm_access" {
-  role       = aws_iam_role.eb_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
+# ========================================
+# EKS CLUSTER AND NODE GROUP
+# ========================================
 
-# Instance profile
-resource "aws_iam_instance_profile" "eb_profile" {
-  name = "${var.app_name}-eb-instance-profile"
-  role = aws_iam_role.eb_instance_role.name
-}
+# EKS Cluster
+resource "aws_eks_cluster" "main" {
+  name     = "${var.app_name}-eks"
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = var.eks_version
 
-# IAM Role for Elastic Beanstalk service
-resource "aws_iam_role" "eb_service_role" {
-  name = "${var.app_name}-eb-service-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "elasticbeanstalk.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = var.tags
-}
-
-resource "aws_iam_role_policy_attachment" "eb_service" {
-  role       = aws_iam_role.eb_service_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth"
-}
-
-resource "aws_iam_role_policy_attachment" "eb_service_basic" {
-  role       = aws_iam_role.eb_service_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService"
-}
-
-# Elastic Beanstalk Application
-resource "aws_elastic_beanstalk_application" "main" {
-  name        = var.app_name
-  description = "Demo DevOps Application"
-
-  tags = var.tags
-}
-
-# Elastic Beanstalk Environment
-resource "aws_elastic_beanstalk_environment" "main" {
-  name                = "${var.app_name}-${var.env_name}"
-  application         = aws_elastic_beanstalk_application.main.name
-  solution_stack_name = "64bit Amazon Linux 2023 v6.11.6 running Node.js 22"
-  tier                = "WebServer"
-
-  # VPC Configuration
-  setting {
-    namespace = "aws:ec2:vpc"
-    name      = "VPCId"
-    value     = aws_vpc.main.id
-  }
-
-  setting {
-    namespace = "aws:ec2:vpc"
-    name      = "Subnets"
-    value     = aws_subnet.public.id
-  }
-
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "SecurityGroups"
-    value     = aws_security_group.eb.id
-  }
-
-  # Service Role
-  setting {
-    namespace = "aws:elasticbeanstalk:environment"
-    name      = "ServiceRole"
-    value     = aws_iam_role.eb_service_role.arn
-  }
-
-  # Instance Configuration
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "IamInstanceProfile"
-    value     = aws_iam_instance_profile.eb_profile.arn
-  }
-
-  setting {
-    namespace = "aws:autoscaling:launchconfiguration"
-    name      = "InstanceType"
-    value     = var.instance_type
-  }
-
-  # Auto Scaling
-  setting {
-    namespace = "aws:autoscaling:asg"
-    name      = "MinSize"
-    value     = var.min_size
-  }
-
-  setting {
-    namespace = "aws:autoscaling:asg"
-    name      = "MaxSize"
-    value     = var.max_size
-  }
-
-  # CloudWatch Logs
-  setting {
-    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
-    name      = "StreamLogs"
-    value     = "true"
-  }
-
-  setting {
-    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
-    name      = "DeleteOnTerminate"
-    value     = "false"
-  }
-
-  # Environment Health Check
-  setting {
-    namespace = "aws:elasticbeanstalk:healthreporting:system"
-    name      = "SystemType"
-    value     = "enhanced"
-  }
-
-  # Application Environment Variable
-  setting {
-    namespace = "aws:elasticbeanstalk:application:environment"
-    name      = "NODE_ENV"
-    value     = var.env_name
+  vpc_config {
+    subnet_ids              = concat(aws_subnet.public[*].id, aws_subnet.private[*].id)
+    endpoint_private_access = true
+    endpoint_public_access  = true
+    security_group_ids      = [aws_security_group.eks_cluster.id]
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.eb_service,
-    aws_iam_role_policy_attachment.eb_service_basic,
+    aws_iam_role_policy_attachment.eks_cluster_policy,
+    aws_iam_role_policy_attachment.eks_vpc_resource_controller,
   ]
 
   tags = var.tags
 }
 
-# CloudWatch Log Group
-resource "aws_cloudwatch_log_group" "eb" {
-  name              = "/aws/elasticbeanstalk/${var.app_name}-${var.env_name}"
-  retention_in_days = 7
+# EKS Node Group
+resource "aws_eks_node_group" "main" {
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = "${var.app_name}-node-group"
+  node_role_arn   = aws_iam_role.eks_nodes.arn
+  subnet_ids      = aws_subnet.private[*].id
+
+  scaling_config {
+    desired_size = var.desired_size
+    max_size     = var.max_size
+    min_size     = var.min_size
+  }
+
+  instance_types = [var.instance_type]
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_worker_node_policy,
+    aws_iam_role_policy_attachment.eks_cni_policy,
+    aws_iam_role_policy_attachment.eks_container_registry_policy,
+  ]
 
   tags = var.tags
 }
 
-# S3 Bucket for Elastic Beanstalk Deployments
-resource "aws_s3_bucket" "eb_deployment" {
-  bucket        = "${var.app_name}-${var.env_name}-deployment-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
+# ECR Repository for Docker images
+resource "aws_ecr_repository" "app" {
+  name                 = var.app_name
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
 
-  tags = merge(
-    var.tags,
-    { Name = "${var.app_name}-deployment-bucket" }
-  )
-}
-
-# Enable versioning on S3 bucket
-resource "aws_s3_bucket_versioning" "eb_deployment" {
-  bucket = aws_s3_bucket.eb_deployment.id
-
-  versioning_configuration {
-    status = var.enable_versioning ? "Enabled" : "Suspended"
+  image_scanning_configuration {
+    scan_on_push = true
   }
+
+  tags = var.tags
 }
 
-# Block public access to S3 bucket
-resource "aws_s3_bucket_public_access_block" "eb_deployment" {
-  bucket = aws_s3_bucket.eb_deployment.id
+# ECR Lifecycle Policy
+resource "aws_ecr_lifecycle_policy" "app" {
+  repository = aws_ecr_repository.app.name
 
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# Server-side encryption for S3 bucket
-resource "aws_s3_bucket_server_side_encryption_configuration" "eb_deployment" {
-  bucket = aws_s3_bucket.eb_deployment.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-# IAM Policy for S3 access (EC2 instances)
-resource "aws_iam_role_policy" "eb_s3_access" {
-  name   = "${var.app_name}-eb-s3-access"
-  role   = aws_iam_role.eb_instance_role.id
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
+    rules = [
       {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:GetObjectVersion",
-          "s3:ListBucket",
-          "s3:ListBucketVersions"
-        ]
-        Resource = [
-          aws_s3_bucket.eb_deployment.arn,
-          "${aws_s3_bucket.eb_deployment.arn}/*"
-        ]
+        rulePriority = 1
+        description  = "Keep last 10 images"
+        selection = {
+          tagStatus     = "any"
+          countType     = "imageCountMoreThan"
+          countNumber   = 10
+        }
+        action = {
+          type = "expire"
+        }
       }
     ]
   })
 }
 
-# IAM Policy for S3 access (Elastic Beanstalk service)
-resource "aws_iam_role_policy" "eb_service_s3_access" {
-  name   = "${var.app_name}-eb-service-s3-access"
-  role   = aws_iam_role.eb_service_role.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:Get*",
-          "s3:List*",
-          "s3:PutObject"
-        ]
-        Resource = [
-          aws_s3_bucket.eb_deployment.arn,
-          "${aws_s3_bucket.eb_deployment.arn}/*"
-        ]
-      }
-    ]
-  })
-}
+# CloudWatch Log Group for EKS
+resource "aws_cloudwatch_log_group" "eks" {
+  name              = "/aws/eks/${var.app_name}-eks/cluster"
+  retention_in_days = 7
 
-# Data source to get current AWS account ID
-data "aws_caller_identity" "current" {}
+  tags = var.tags
+}
 
 # IAM User for GitHub Actions CI/CD
 resource "aws_iam_user" "github_actions" {
@@ -394,7 +335,7 @@ resource "aws_iam_user" "github_actions" {
   tags = var.tags
 }
 
-# IAM Policy for GitHub Actions - S3 and Elastic Beanstalk deployment
+# IAM Policy for GitHub Actions - ECR and EKS deployment
 resource "aws_iam_user_policy" "github_actions_deploy" {
   name = "${var.app_name}-github-actions-deploy-policy"
   user = aws_iam_user.github_actions.name
@@ -402,43 +343,6 @@ resource "aws_iam_user_policy" "github_actions_deploy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Sid    = "S3DeploymentBucketAccess"
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:GetObject",
-          "s3:ListBucket",
-          "s3:GetBucketLocation"
-        ]
-        Resource = [
-          aws_s3_bucket.eb_deployment.arn,
-          "${aws_s3_bucket.eb_deployment.arn}/*"
-        ]
-      },
-      {
-        Sid    = "ElasticBeanstalkDeployment"
-        Effect = "Allow"
-        Action = [
-          "elasticbeanstalk:CreateApplicationVersion",
-          "elasticbeanstalk:DescribeApplicationVersions",
-          "elasticbeanstalk:DescribeEnvironments",
-          "elasticbeanstalk:UpdateEnvironment",
-          "elasticbeanstalk:DescribeEvents"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "IAMPassRole"
-        Effect = "Allow"
-        Action = [
-          "iam:PassRole"
-        ]
-        Resource = [
-          aws_iam_role.eb_instance_role.arn,
-          aws_iam_role.eb_service_role.arn
-        ]
-      },
       {
         Sid    = "ECRAccess"
         Effect = "Allow"
@@ -450,10 +354,9 @@ resource "aws_iam_user_policy" "github_actions_deploy" {
           "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload",
           "ecr:DescribeRepositories",
-          "ecr:CreateRepository",
           "ecr:BatchCheckLayerAvailability"
         ]
-        Resource = "arn:aws:ecr:${var.aws_region}:${data.aws_caller_identity.current.account_id}:repository/*"
+        Resource = aws_ecr_repository.app.arn
       },
       {
         Sid    = "ECRAuthToken"
@@ -462,6 +365,15 @@ resource "aws_iam_user_policy" "github_actions_deploy" {
           "ecr:GetAuthorizationToken"
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "EKSAccess"
+        Effect = "Allow"
+        Action = [
+          "eks:DescribeCluster",
+          "eks:ListClusters"
+        ]
+        Resource = aws_eks_cluster.main.arn
       }
     ]
   })

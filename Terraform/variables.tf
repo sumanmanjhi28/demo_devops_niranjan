@@ -17,45 +17,39 @@ variable "env_name" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type"
+  description = "EC2 instance type for EKS nodes"
   type        = string
-  default     = "t3.micro"
+  default     = "t3.medium"
 }
 
 variable "min_size" {
-  description = "Minimum number of instances"
+  description = "Minimum number of EKS nodes"
   type        = number
   default     = 1
 }
 
 variable "max_size" {
-  description = "Maximum number of instances"
+  description = "Maximum number of EKS nodes"
   type        = number
   default     = 3
+}
+
+variable "desired_size" {
+  description = "Desired number of EKS nodes"
+  type        = number
+  default     = 2
+}
+
+variable "eks_version" {
+  description = "EKS cluster version"
+  type        = string
+  default     = "1.28"
 }
 
 variable "vpc_cidr" {
   description = "CIDR block for VPC"
   type        = string
   default     = "10.0.0.0/16"
-}
-
-variable "enable_enhanced_monitoring" {
-  description = "Enable enhanced monitoring for Elastic Beanstalk"
-  type        = bool
-  default     = true
-}
-
-variable "s3_bucket_suffix" {
-  description = "Suffix for S3 bucket name (must be globally unique)"
-  type        = string
-  default     = "deployment"
-}
-
-variable "enable_versioning" {
-  description = "Enable versioning on S3 bucket"
-  type        = bool
-  default     = true
 }
 
 variable "tags" {
