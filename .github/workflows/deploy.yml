@@ -1,14 +1,10 @@
 name: Terraform EKS + Deploy to Kubernetes
 
 on:
-  push:
-    branches:
-      - main
-      - release/*
   workflow_dispatch:
     inputs:
       action:
-        description: Select whether to apply or destroy Terraform infrastructure
+        description: Select whether to apply or destroy infrastructure
         required: true
         default: apply
         type: choice
@@ -16,7 +12,7 @@ on:
           - apply
           - destroy
       deploy_app:
-        description: Deploy app after Terraform apply
+        description: Deploy app after infrastructure is ready
         required: false
         default: true
         type: boolean
@@ -53,22 +49,68 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Verify Backend Exists
+        id: check-backend
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="demo-devops-terraform-state-${ACCOUNT_ID}"
+          TABLE_NAME="demo-devops-terraform-locks"
+          
+          echo "Checking for Terraform backend..."
+          echo "Expected S3 Bucket: $BUCKET_NAME"
+          echo "Expected DynamoDB Table: $TABLE_NAME"
+          echo ""
+          
+          # Check S3 bucket
+          if aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "✓ S3 bucket exists"
+            BUCKET_EXISTS=true
+          else
+            echo "✗ S3 bucket NOT found"
+            BUCKET_EXISTS=false
+          fi
+          
+          # Check DynamoDB table
+          if aws dynamodb describe-table --table-name "$TABLE_NAME" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✓ DynamoDB table exists"
+            TABLE_EXISTS=true
+          else
+            echo "✗ DynamoDB table NOT found"
+            TABLE_EXISTS=false
+          fi
+          
+          echo ""
+          if [ "$BUCKET_EXISTS" = false ] || [ "$TABLE_EXISTS" = false ]; then
+            echo "❌ ERROR: Backend resources not found!"
+            echo ""
+            echo "Please run 'Terraform Backend Setup' workflow first:"
+            echo "  1. Go to Actions → Terraform Backend Setup"
+            echo "  2. Run workflow → action: setup"
+            echo "  3. Wait for completion"
+            echo "  4. Then run this workflow again"
+            echo ""
+            exit 1
+          fi
+          
+          echo "✓ Backend is ready!"
+          echo "backend_ready=true" >> $GITHUB_OUTPUT
+
       - name: Terraform init
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform init
 
       - name: Terraform plan
-        if: github.event_name == 'push' || github.event.inputs.action == 'apply'
+        if: inputs.action == 'apply'
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform plan -out=tfplan
 
       - name: Terraform apply
-        if: github.event_name == 'push' || github.event.inputs.action == 'apply'
+        if: inputs.action == 'apply'
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform apply -auto-approve tfplan
 
       - name: Get Terraform Outputs
-        if: github.event_name == 'push' || github.event.inputs.action == 'apply'
+        if: inputs.action == 'apply'
         id: tf-outputs
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
@@ -76,12 +118,32 @@ jobs:
           echo "ecr_repo=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
 
       - name: Terraform destroy
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        if: inputs.action == 'destroy'
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform destroy -auto-approve
 
+      - name: Post-Destroy Reminder
+        if: inputs.action == 'destroy'
+        run: |
+          echo "## Infrastructure Destroyed Successfully! ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps (Optional)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "If you want to completely clean up (including backend):" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to **Actions** → **Terraform Backend Setup**" >> $GITHUB_STEP_SUMMARY
+          echo "2. Run workflow → **action: destroy**" >> $GITHUB_STEP_SUMMARY
+          echo "3. This will delete:" >> $GITHUB_STEP_SUMMARY
+          echo "   - S3 bucket (terraform state)" >> $GITHUB_STEP_SUMMARY
+          echo "   - DynamoDB table (state locks)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **Note**: Destroying backend will erase all Terraform state history!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Current Status" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ EKS Infrastructure: Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚠️ Backend: Still exists (~\$1/month)" >> $GITHUB_STEP_SUMMARY
+
   build-and-deploy:
-    if: (github.event_name == 'push' || github.event.inputs.action == 'apply') && (github.event.inputs.deploy_app == 'true' || github.event_name == 'push')
+    if: inputs.action == 'apply' && inputs.deploy_app == true
     needs: terraform
     runs-on: ubuntu-latest
     permissions:
