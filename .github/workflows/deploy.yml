@@ -179,10 +179,67 @@ jobs:
           echo "eks_cluster=$(terraform output -raw eks_cluster_name)" >> $GITHUB_OUTPUT
           echo "ecr_repo=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
 
+      - name: Cleanup Kubernetes Resources (before destroy)
+        if: inputs.action == 'destroy'
+        continue-on-error: true
+        run: |
+          echo "========================================="
+          echo "Cleaning up Kubernetes resources..."
+          echo "========================================="
+          
+          # Try to connect to EKS cluster
+          if aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "Updating kubeconfig..."
+            aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+            
+            echo "Deleting LoadBalancer service (releases AWS Load Balancer)..."
+            kubectl delete service demo-devops-service -n default --ignore-not-found=true --timeout=5m
+            
+            echo "Deleting deployment..."
+            kubectl delete deployment demo-devops-app -n default --ignore-not-found=true --timeout=2m
+            
+            echo ""
+            echo "Waiting for AWS Load Balancer to be fully released..."
+            echo "This is necessary to allow Terraform to destroy VPC resources..."
+            
+            # Wait up to 3 minutes for load balancer to be deleted
+            for i in {1..36}; do
+              LB_COUNT=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='vpc-0f9dc44898df8fe19'] | length(@)" --output text 2>/dev/null || echo "0")
+              CLB_COUNT=$(aws elb describe-load-balancers --query "LoadBalancerDescriptions[?VPCId=='vpc-0f9dc44898df8fe19'] | length(@)" --output text 2>/dev/null || echo "0")
+              
+              if [ "$LB_COUNT" = "0" ] && [ "$CLB_COUNT" = "0" ]; then
+                echo "✓ Load Balancer fully released!"
+                break
+              fi
+              
+              echo "  Waiting... (attempt $i/36) - LBs remaining: $((LB_COUNT + CLB_COUNT))"
+              sleep 5
+            done
+            
+            echo "✓ Kubernetes resources cleaned up"
+          else
+            echo "⚠️  EKS cluster not found or already deleted, skipping k8s cleanup"
+          fi
+          
+          echo "========================================="
+
       - name: Terraform destroy
         if: inputs.action == 'destroy'
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform destroy -auto-approve
+        run: |
+          echo "Starting Terraform destroy..."
+          terraform destroy -auto-approve
+          
+          # If destroy fails due to dependencies, wait and retry once
+          if [ $? -ne 0 ]; then
+            echo ""
+            echo "⚠️  Terraform destroy failed, waiting 30s and retrying..."
+            echo "This can happen if AWS resources are still being released..."
+            sleep 30
+            
+            echo "Retrying terraform destroy..."
+            terraform destroy -auto-approve
+          fi
 
       - name: Destroy Backend (Auto-cleanup)
         if: inputs.action == 'destroy'
