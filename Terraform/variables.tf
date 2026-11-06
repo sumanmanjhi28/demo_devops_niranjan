@@ -80,7 +80,7 @@ variable "eb_instance_type" {
 variable "eb_solution_stack" {
   description = "Elastic Beanstalk solution stack name"
   type        = string
-  default     = "64bit Amazon Linux 2023 v6.1.11 running Node.js 22"
+  default     = "64bit Amazon Linux 2023 v6.2.0 running Node.js 20"
 }
 
 variable "eb_min_instances" {
