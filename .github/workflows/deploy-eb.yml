@@ -1,0 +1,379 @@
+name: Deploy to Elastic Beanstalk
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_label:
+        description: 'Version label for deployment (e.g., v1.0.0 or leave empty for auto)'
+        required: false
+        type: string
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+        default: dev
+
+env:
+  AWS_REGION: us-east-1
+  APP_NAME: demo-devops
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy to EB
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS credentials
+        run: |
+          echo "Verifying AWS credentials..."
+          aws sts get-caller-identity
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "ACCOUNT_ID=${ACCOUNT_ID}" >> $GITHUB_ENV
+
+      - name: Check Elastic Beanstalk resources
+        id: check_eb
+        run: |
+          echo "Checking if Elastic Beanstalk resources exist..."
+          
+          # Check if EB application exists
+          if aws elasticbeanstalk describe-applications \
+            --application-names ${{ env.APP_NAME }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null | grep -q "ApplicationName"; then
+            echo "✅ EB Application exists: ${{ env.APP_NAME }}"
+          else
+            echo "❌ EB Application does not exist: ${{ env.APP_NAME }}"
+            echo "⚠️  Please run terraform-provision.yml workflow with enable_eb=true first!"
+            exit 1
+          fi
+          
+          # Check if EB environment exists
+          ENV_NAME="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          if aws elasticbeanstalk describe-environments \
+            --environment-names "${ENV_NAME}" \
+            --region ${{ env.AWS_REGION }} 2>/dev/null | grep -q "EnvironmentName"; then
+            echo "✅ EB Environment exists: ${ENV_NAME}"
+            echo "env_name=${ENV_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "❌ EB Environment does not exist: ${ENV_NAME}"
+            echo "⚠️  Please run terraform-provision.yml workflow with enable_eb=true first!"
+            exit 1
+          fi
+          
+          # Check S3 bucket
+          S3_BUCKET="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}-deployment-${ACCOUNT_ID}"
+          if aws s3 ls "s3://${S3_BUCKET}" 2>/dev/null; then
+            echo "✅ S3 deployment bucket exists: ${S3_BUCKET}"
+            echo "s3_bucket=${S3_BUCKET}" >> $GITHUB_OUTPUT
+          else
+            echo "❌ S3 deployment bucket does not exist: ${S3_BUCKET}"
+            echo "⚠️  Please run terraform-provision.yml workflow with enable_eb=true first!"
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          echo "Installing Node.js dependencies..."
+          npm ci
+
+      - name: Run tests (if any)
+        run: |
+          echo "Running tests..."
+          npm test || echo "⚠️  No tests found or tests failed (continuing anyway)"
+        continue-on-error: true
+
+      - name: Set version label
+        id: version
+        run: |
+          if [ -z "${{ github.event.inputs.version_label }}" ]; then
+            VERSION="v$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          else
+            VERSION="${{ github.event.inputs.version_label }}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "📦 Version: ${VERSION}"
+
+      - name: Package application
+        run: |
+          echo "Packaging application for Elastic Beanstalk..."
+          
+          # Create deployment package excluding unnecessary files
+          zip -r app-${{ steps.version.outputs.version }}.zip . \
+            -x "node_modules/*" \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x "Terraform/*" \
+            -x "k8s/*" \
+            -x "*.md" \
+            -x ".gitignore" \
+            -x ".dockerignore" \
+            -x "dockerfile" \
+            -x "Jenkinsfile" \
+            -x "*.log" \
+            -x "*.pyc" \
+            -x "__pycache__/*" \
+            -x "test.py" \
+            -x "test.sh" \
+            -x "*.txt"
+          
+          ls -lh app-${{ steps.version.outputs.version }}.zip
+          
+          echo "### 📦 Application Package Created" >> $GITHUB_STEP_SUMMARY
+          echo "- **File:** \`app-${{ steps.version.outputs.version }}.zip\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Size:** $(du -h app-${{ steps.version.outputs.version }}.zip | cut -f1)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload to S3
+        id: upload
+        run: |
+          S3_BUCKET="${{ steps.check_eb.outputs.s3_bucket }}"
+          S3_KEY="app-${{ steps.version.outputs.version }}.zip"
+          
+          echo "Uploading to S3: s3://${S3_BUCKET}/${S3_KEY}"
+          
+          aws s3 cp app-${{ steps.version.outputs.version }}.zip \
+            s3://${S3_BUCKET}/${S3_KEY} \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "✅ Uploaded to S3 successfully"
+          echo "s3_key=${S3_KEY}" >> $GITHUB_OUTPUT
+          
+          echo "### ☁️ Uploaded to S3" >> $GITHUB_STEP_SUMMARY
+          echo "- **Bucket:** \`${S3_BUCKET}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Key:** \`${S3_KEY}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Create application version
+        id: create_version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          S3_BUCKET="${{ steps.check_eb.outputs.s3_bucket }}"
+          S3_KEY="${{ steps.upload.outputs.s3_key }}"
+          
+          echo "Creating Elastic Beanstalk application version: ${VERSION}"
+          
+          aws elasticbeanstalk create-application-version \
+            --application-name ${{ env.APP_NAME }} \
+            --version-label "${VERSION}" \
+            --source-bundle S3Bucket="${S3_BUCKET}",S3Key="${S3_KEY}" \
+            --description "Deployed via GitHub Actions - ${GITHUB_SHA::7}" \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "✅ Application version created: ${VERSION}"
+          
+          echo "### 📋 Application Version Created" >> $GITHUB_STEP_SUMMARY
+          echo "- **Application:** \`${{ env.APP_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Deploy to environment
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ENV_NAME="${{ steps.check_eb.outputs.env_name }}"
+          
+          echo "Deploying version ${VERSION} to environment ${ENV_NAME}..."
+          
+          aws elasticbeanstalk update-environment \
+            --environment-name "${ENV_NAME}" \
+            --version-label "${VERSION}" \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "✅ Deployment initiated"
+          
+          echo "### 🚀 Deployment Started" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** \`${ENV_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⏳ Environment is updating... This may take 5-10 minutes." >> $GITHUB_STEP_SUMMARY
+
+      - name: Wait for deployment
+        id: wait
+        run: |
+          ENV_NAME="${{ steps.check_eb.outputs.env_name }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          
+          echo "Waiting for environment to update..."
+          echo "This may take 5-10 minutes. Checking every 30 seconds..."
+          
+          MAX_ATTEMPTS=20
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Attempt ${ATTEMPT}/${MAX_ATTEMPTS}..."
+            
+            # Get environment status
+            STATUS=$(aws elasticbeanstalk describe-environments \
+              --environment-names "${ENV_NAME}" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Environments[0].Status' \
+              --output text)
+            
+            HEALTH=$(aws elasticbeanstalk describe-environments \
+              --environment-names "${ENV_NAME}" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Environments[0].Health' \
+              --output text)
+            
+            DEPLOYED_VERSION=$(aws elasticbeanstalk describe-environments \
+              --environment-names "${ENV_NAME}" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Environments[0].VersionLabel' \
+              --output text)
+            
+            echo "  Status: ${STATUS}"
+            echo "  Health: ${HEALTH}"
+            echo "  Deployed Version: ${DEPLOYED_VERSION}"
+            
+            # Check if deployment is complete
+            if [ "${STATUS}" == "Ready" ] && [ "${DEPLOYED_VERSION}" == "${VERSION}" ]; then
+              echo "✅ Deployment completed successfully!"
+              echo "deployment_status=success" >> $GITHUB_OUTPUT
+              break
+            fi
+            
+            # Check for failure
+            if [ "${STATUS}" == "Terminated" ]; then
+              echo "❌ Environment terminated during deployment!"
+              echo "deployment_status=failed" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            # Wait before next check
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              sleep 30
+            fi
+          done
+          
+          # Check if we timed out
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ] && [ "${STATUS}" != "Ready" ]; then
+            echo "⚠️  Deployment is still in progress after maximum wait time"
+            echo "  Current status: ${STATUS}"
+            echo "  You can monitor the deployment in AWS Console"
+            echo "deployment_status=timeout" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get environment URL
+        id: get_url
+        if: steps.wait.outputs.deployment_status == 'success'
+        run: |
+          ENV_NAME="${{ steps.check_eb.outputs.env_name }}"
+          
+          CNAME=$(aws elasticbeanstalk describe-environments \
+            --environment-names "${ENV_NAME}" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          
+          URL="http://${CNAME}"
+          echo "url=${URL}" >> $GITHUB_OUTPUT
+          echo "🌐 Application URL: ${URL}"
+
+      - name: Test deployment
+        if: steps.wait.outputs.deployment_status == 'success'
+        run: |
+          URL="${{ steps.get_url.outputs.url }}"
+          
+          echo "Testing deployment at ${URL}..."
+          
+          # Wait a few seconds for the app to be fully ready
+          sleep 10
+          
+          # Test with retry
+          MAX_RETRIES=5
+          RETRY=0
+          
+          while [ $RETRY -lt $MAX_RETRIES ]; do
+            RETRY=$((RETRY + 1))
+            echo "Test attempt ${RETRY}/${MAX_RETRIES}..."
+            
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${URL}" || echo "000")
+            
+            if [ "${HTTP_CODE}" == "200" ]; then
+              echo "✅ Application is responding with HTTP 200"
+              echo "test_status=success" >> $GITHUB_ENV
+              break
+            else
+              echo "⚠️  Got HTTP ${HTTP_CODE}"
+              if [ $RETRY -lt $MAX_RETRIES ]; then
+                sleep 10
+              fi
+            fi
+          done
+          
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "⚠️  Application not responding with HTTP 200 after ${MAX_RETRIES} attempts"
+            echo "  Last HTTP code: ${HTTP_CODE}"
+            echo "test_status=failed" >> $GITHUB_ENV
+          fi
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.wait.outputs.deployment_status }}" == "success" ]; then
+            echo "## ✅ Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🌐 Access Your Application" >> $GITHUB_STEP_SUMMARY
+            echo "**URL:** [${{ steps.get_url.outputs.url }}](${{ steps.get_url.outputs.url }})" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "${{ env.test_status }}" == "success" ]; then
+              echo "### ✅ Health Check Passed" >> $GITHUB_STEP_SUMMARY
+              echo "Application is responding with HTTP 200" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "### ⚠️ Health Check Warning" >> $GITHUB_STEP_SUMMARY
+              echo "Deployment completed but health check did not return HTTP 200" >> $GITHUB_STEP_SUMMARY
+              echo "Please verify the application manually" >> $GITHUB_STEP_SUMMARY
+            fi
+          elif [ "${{ steps.wait.outputs.deployment_status }}" == "timeout" ]; then
+            echo "## ⏳ Deployment In Progress" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "The deployment is still updating. Check AWS Console for status:" >> $GITHUB_STEP_SUMMARY
+            echo "- Environment: \`${{ steps.check_eb.outputs.env_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Region: \`${{ env.AWS_REGION }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Check the logs above for error details" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Deployment Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Application:** \`${{ env.APP_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** \`${{ steps.check_eb.outputs.env_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+
+      - name: Get recent events
+        if: failure()
+        run: |
+          ENV_NAME="${{ steps.check_eb.outputs.env_name }}"
+          
+          echo "Recent Elastic Beanstalk events:"
+          aws elasticbeanstalk describe-events \
+            --environment-name "${ENV_NAME}" \
+            --max-records 20 \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Events[*].[EventDate,Severity,Message]' \
+            --output table

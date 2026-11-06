@@ -309,9 +309,9 @@ resource "aws_ecr_lifecycle_policy" "app" {
         rulePriority = 1
         description  = "Keep last 10 images"
         selection = {
-          tagStatus     = "any"
-          countType     = "imageCountMoreThan"
-          countNumber   = 10
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 10
         }
         action = {
           type = "expire"
@@ -382,4 +382,395 @@ resource "aws_iam_user_policy" "github_actions_deploy" {
 # Access Key for GitHub Actions User
 resource "aws_iam_access_key" "github_actions" {
   user = aws_iam_user.github_actions.name
+}
+
+# ========================================
+# ELASTIC BEANSTALK WITH S3 (OPTIONAL)
+# ========================================
+
+# S3 Bucket for Elastic Beanstalk Application Versions
+resource "aws_s3_bucket" "eb_deployment" {
+  count  = var.enable_elastic_beanstalk ? 1 : 0
+  bucket = "${var.app_name}-${var.env_name}-deployment-${data.aws_caller_identity.current.account_id}"
+
+  force_destroy = true
+
+  tags = merge(
+    var.tags,
+    { Name = "${var.app_name}-${var.env_name}-deployment" }
+  )
+}
+
+# S3 Bucket Versioning
+resource "aws_s3_bucket_versioning" "eb_deployment" {
+  count  = var.enable_elastic_beanstalk ? 1 : 0
+  bucket = aws_s3_bucket.eb_deployment[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# S3 Bucket Encryption
+resource "aws_s3_bucket_server_side_encryption_configuration" "eb_deployment" {
+  count  = var.enable_elastic_beanstalk ? 1 : 0
+  bucket = aws_s3_bucket.eb_deployment[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# S3 Bucket Public Access Block
+resource "aws_s3_bucket_public_access_block" "eb_deployment" {
+  count  = var.enable_elastic_beanstalk ? 1 : 0
+  bucket = aws_s3_bucket.eb_deployment[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# ========================================
+# IAM ROLES FOR ELASTIC BEANSTALK
+# ========================================
+
+# IAM Role for EB EC2 Instances
+resource "aws_iam_role" "eb_instance_role" {
+  count = var.enable_elastic_beanstalk ? 1 : 0
+  name  = "${var.app_name}-eb-instance-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+# IAM Instance Profile for EB
+resource "aws_iam_instance_profile" "eb_instance_profile" {
+  count = var.enable_elastic_beanstalk ? 1 : 0
+  name  = "${var.app_name}-eb-instance-profile"
+  role  = aws_iam_role.eb_instance_role[0].name
+}
+
+# Attach AWS managed policies to EB instance role
+resource "aws_iam_role_policy_attachment" "eb_web_tier" {
+  count      = var.enable_elastic_beanstalk ? 1 : 0
+  role       = aws_iam_role.eb_instance_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier"
+}
+
+resource "aws_iam_role_policy_attachment" "eb_multicontainer_docker" {
+  count      = var.enable_elastic_beanstalk ? 1 : 0
+  role       = aws_iam_role.eb_instance_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker"
+}
+
+resource "aws_iam_role_policy_attachment" "eb_worker_tier" {
+  count      = var.enable_elastic_beanstalk ? 1 : 0
+  role       = aws_iam_role.eb_instance_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier"
+}
+
+resource "aws_iam_role_policy_attachment" "cloudwatch_agent" {
+  count      = var.enable_elastic_beanstalk ? 1 : 0
+  role       = aws_iam_role.eb_instance_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+# IAM Role for EB Service
+resource "aws_iam_role" "eb_service_role" {
+  count = var.enable_elastic_beanstalk ? 1 : 0
+  name  = "${var.app_name}-eb-service-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "elasticbeanstalk.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+# Attach service role policies
+resource "aws_iam_role_policy_attachment" "eb_service" {
+  count      = var.enable_elastic_beanstalk ? 1 : 0
+  role       = aws_iam_role.eb_service_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService"
+}
+
+resource "aws_iam_role_policy_attachment" "eb_enhanced_health" {
+  count      = var.enable_elastic_beanstalk ? 1 : 0
+  role       = aws_iam_role.eb_service_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth"
+}
+
+# ========================================
+# ELASTIC BEANSTALK APPLICATION
+# ========================================
+
+# Elastic Beanstalk Application
+resource "aws_elastic_beanstalk_application" "main" {
+  count       = var.enable_elastic_beanstalk ? 1 : 0
+  name        = var.app_name
+  description = "${var.app_name} Node.js application"
+
+  tags = var.tags
+}
+
+# CloudWatch Log Group for EB
+resource "aws_cloudwatch_log_group" "eb" {
+  count             = var.enable_elastic_beanstalk ? 1 : 0
+  name              = "/aws/elasticbeanstalk/${var.app_name}-${var.env_name}"
+  retention_in_days = 7
+
+  tags = var.tags
+}
+
+# Security Group for EB Environment
+resource "aws_security_group" "eb_instances" {
+  count       = var.enable_elastic_beanstalk ? 1 : 0
+  name        = "${var.app_name}-eb-instances-sg"
+  description = "Security group for Elastic Beanstalk instances"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow HTTP from anywhere"
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow HTTPS from anywhere"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound traffic"
+  }
+
+  tags = merge(
+    var.tags,
+    { Name = "${var.app_name}-eb-instances-sg" }
+  )
+}
+
+# Elastic Beanstalk Environment
+resource "aws_elastic_beanstalk_environment" "main" {
+  count               = var.enable_elastic_beanstalk ? 1 : 0
+  name                = "${var.app_name}-${var.env_name}"
+  application         = aws_elastic_beanstalk_application.main[0].name
+  solution_stack_name = var.eb_solution_stack
+  tier                = "WebServer"
+
+  # VPC Configuration
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "VPCId"
+    value     = aws_vpc.main.id
+  }
+
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "Subnets"
+    value     = join(",", aws_subnet.public[*].id)
+  }
+
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "ELBSubnets"
+    value     = join(",", aws_subnet.public[*].id)
+  }
+
+  setting {
+    namespace = "aws:ec2:vpc"
+    name      = "AssociatePublicIpAddress"
+    value     = "true"
+  }
+
+  # Instance Configuration
+  setting {
+    namespace = "aws:autoscaling:launchconfiguration"
+    name      = "InstanceType"
+    value     = var.eb_instance_type
+  }
+
+  setting {
+    namespace = "aws:autoscaling:launchconfiguration"
+    name      = "IamInstanceProfile"
+    value     = aws_iam_instance_profile.eb_instance_profile[0].name
+  }
+
+  setting {
+    namespace = "aws:autoscaling:launchconfiguration"
+    name      = "SecurityGroups"
+    value     = aws_security_group.eb_instances[0].id
+  }
+
+  # Auto Scaling Configuration
+  setting {
+    namespace = "aws:autoscaling:asg"
+    name      = "MinSize"
+    value     = var.eb_min_instances
+  }
+
+  setting {
+    namespace = "aws:autoscaling:asg"
+    name      = "MaxSize"
+    value     = var.eb_max_instances
+  }
+
+  # Load Balancer Configuration
+  setting {
+    namespace = "aws:elasticbeanstalk:environment"
+    name      = "LoadBalancerType"
+    value     = "application"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:environment"
+    name      = "ServiceRole"
+    value     = aws_iam_role.eb_service_role[0].arn
+  }
+
+  # Environment Variables
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "NODE_ENV"
+    value     = "production"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "PORT"
+    value     = "8080"
+  }
+
+  # Enhanced Health Reporting
+  setting {
+    namespace = "aws:elasticbeanstalk:healthreporting:system"
+    name      = "SystemType"
+    value     = "enhanced"
+  }
+
+  # CloudWatch Logs
+  setting {
+    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
+    name      = "StreamLogs"
+    value     = "true"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
+    name      = "DeleteOnTerminate"
+    value     = "true"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:cloudwatch:logs"
+    name      = "RetentionInDays"
+    value     = "7"
+  }
+
+  # Deployment Configuration
+  setting {
+    namespace = "aws:elasticbeanstalk:command"
+    name      = "DeploymentPolicy"
+    value     = "Rolling"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:command"
+    name      = "BatchSizeType"
+    value     = "Percentage"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:command"
+    name      = "BatchSize"
+    value     = "50"
+  }
+
+  # Managed Updates
+  setting {
+    namespace = "aws:elasticbeanstalk:managedactions"
+    name      = "ManagedActionsEnabled"
+    value     = "false"
+  }
+
+  tags = var.tags
+
+  depends_on = [
+    aws_elastic_beanstalk_application.main,
+    aws_iam_role.eb_instance_role,
+    aws_iam_role.eb_service_role
+  ]
+}
+
+# IAM Policy for GitHub Actions - Add EB deployment permissions
+resource "aws_iam_user_policy" "github_actions_eb" {
+  count = var.enable_elastic_beanstalk ? 1 : 0
+  name  = "${var.app_name}-github-actions-eb-policy"
+  user  = aws_iam_user.github_actions.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EBDeployment"
+        Effect = "Allow"
+        Action = [
+          "elasticbeanstalk:CreateApplicationVersion",
+          "elasticbeanstalk:DescribeApplicationVersions",
+          "elasticbeanstalk:DescribeEnvironments",
+          "elasticbeanstalk:UpdateEnvironment",
+          "elasticbeanstalk:DescribeEvents"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "S3DeploymentBucket"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:DeleteObject"
+        ]
+        Resource = [
+          aws_s3_bucket.eb_deployment[0].arn,
+          "${aws_s3_bucket.eb_deployment[0].arn}/*"
+        ]
+      }
+    ]
+  })
 }

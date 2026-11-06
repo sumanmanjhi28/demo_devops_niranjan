@@ -60,3 +60,37 @@ variable "tags" {
     Environment = "dev"
   }
 }
+
+# ========================================
+# ELASTIC BEANSTALK VARIABLES
+# ========================================
+
+variable "enable_elastic_beanstalk" {
+  description = "Enable Elastic Beanstalk deployment (set to true to provision EBS alongside EKS)"
+  type        = bool
+  default     = false
+}
+
+variable "eb_instance_type" {
+  description = "EC2 instance type for Elastic Beanstalk"
+  type        = string
+  default     = "t3.micro"
+}
+
+variable "eb_solution_stack" {
+  description = "Elastic Beanstalk solution stack name"
+  type        = string
+  default     = "64bit Amazon Linux 2023 v6.1.11 running Node.js 22"
+}
+
+variable "eb_min_instances" {
+  description = "Minimum number of instances for Elastic Beanstalk auto scaling"
+  type        = number
+  default     = 1
+}
+
+variable "eb_max_instances" {
+  description = "Maximum number of instances for Elastic Beanstalk auto scaling"
+  type        = number
+  default     = 2
+}

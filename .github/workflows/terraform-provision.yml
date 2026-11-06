@@ -1,0 +1,257 @@
+name: Terraform - Provision Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      enable_eb:
+        description: 'Enable Elastic Beanstalk'
+        required: true
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.5.7
+
+jobs:
+  terraform:
+    name: Terraform ${{ github.event.inputs.action }}
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: ./Terraform
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Verify AWS credentials
+        run: |
+          echo "Verifying AWS credentials..."
+          aws sts get-caller-identity
+          echo "AWS Account ID: $(aws sts get-caller-identity --query Account --output text)"
+
+      - name: Check backend exists
+        id: check_backend
+        run: |
+          echo "========================================="
+          echo "Checking Terraform Backend"
+          echo "========================================="
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="demo-devops-terraform-state-${ACCOUNT_ID}"
+          TABLE_NAME="demo-devops-terraform-locks"
+          
+          echo "Expected backend resources:"
+          echo "  - S3 Bucket: ${BUCKET_NAME}"
+          echo "  - DynamoDB Table: ${TABLE_NAME}"
+          echo ""
+          
+          # Check S3 bucket
+          echo "Checking S3 bucket..."
+          if aws s3 ls "s3://${BUCKET_NAME}" 2>/dev/null; then
+            echo "✅ S3 backend bucket exists: ${BUCKET_NAME}"
+            echo "backend_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ S3 backend bucket does not exist: ${BUCKET_NAME}"
+            echo ""
+            echo "========================================="
+            echo "⚠️  BACKEND NOT FOUND"
+            echo "========================================="
+            echo ""
+            echo "Please run the 'Terraform Backend Setup' workflow first:"
+            echo ""
+            echo "1. Go to Actions tab"
+            echo "2. Select 'Terraform Backend Setup' workflow"
+            echo "3. Click 'Run workflow'"
+            echo "4. Select action: setup"
+            echo "5. Run this workflow again after backend is created"
+            echo ""
+            echo "backend_exists=false" >> $GITHUB_OUTPUT
+            
+            echo "## ❌ Backend Not Found" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Required Action" >> $GITHUB_STEP_SUMMARY
+            echo "The Terraform backend (S3 + DynamoDB) does not exist." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Please run the \`Terraform Backend Setup\` workflow first:**" >> $GITHUB_STEP_SUMMARY
+            echo "1. Go to **Actions** tab" >> $GITHUB_STEP_SUMMARY
+            echo "2. Select **Terraform Backend Setup** workflow" >> $GITHUB_STEP_SUMMARY
+            echo "3. Click **Run workflow**" >> $GITHUB_STEP_SUMMARY
+            echo "4. Select \`action: setup\`" >> $GITHUB_STEP_SUMMARY
+            echo "5. Run this workflow again" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Expected Resources" >> $GITHUB_STEP_SUMMARY
+            echo "- S3 Bucket: \`${BUCKET_NAME}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- DynamoDB Table: \`${TABLE_NAME}\`" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          # Check DynamoDB table
+          echo "Checking DynamoDB table..."
+          if aws dynamodb describe-table --table-name "${TABLE_NAME}" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✅ DynamoDB lock table exists: ${TABLE_NAME}"
+          else
+            echo "❌ DynamoDB lock table does not exist: ${TABLE_NAME}"
+            echo ""
+            echo "========================================="
+            echo "⚠️  BACKEND INCOMPLETE"
+            echo "========================================="
+            echo ""
+            echo "S3 bucket exists but DynamoDB table is missing."
+            echo "Please run 'Terraform Backend Setup' workflow to fix."
+            echo ""
+            
+            echo "## ❌ Backend Incomplete" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "S3 bucket exists but DynamoDB table is missing." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Run the **Terraform Backend Setup** workflow with \`action: setup\`" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ Backend check passed!"
+          echo "========================================="
+
+      - name: Terraform Init
+        run: |
+          echo "Initializing Terraform..."
+          terraform init
+
+      - name: Terraform Validate
+        run: |
+          echo "Validating Terraform configuration..."
+          terraform validate
+
+      - name: Terraform Format Check
+        run: |
+          echo "Checking Terraform formatting..."
+          terraform fmt -check || echo "⚠️  Run 'terraform fmt' to fix formatting"
+
+      - name: Terraform Plan
+        id: plan
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        run: |
+          echo "Running Terraform plan..."
+          terraform plan \
+            -var="enable_elastic_beanstalk=${{ github.event.inputs.enable_eb }}" \
+            -out=tfplan \
+            -no-color
+        continue-on-error: false
+
+      - name: Save Plan Output
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        run: |
+          echo "Saving plan output..."
+          terraform show -no-color tfplan > plan_output.txt
+          echo "### Terraform Plan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          head -n 100 plan_output.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Terraform Apply
+        if: github.event.inputs.action == 'apply'
+        run: |
+          echo "Applying Terraform configuration..."
+          terraform apply -auto-approve tfplan
+
+      - name: Terraform Outputs
+        if: github.event.inputs.action == 'apply'
+        id: outputs
+        run: |
+          echo "Retrieving Terraform outputs..."
+          terraform output -json > outputs.json
+          
+          echo "### 🎉 Infrastructure Provisioned Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # EKS Outputs
+          echo "#### EKS Cluster" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cluster Name:** \`$(terraform output -raw eks_cluster_name)\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **ECR Repository:** \`$(terraform output -raw ecr_repository_url)\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # EB Outputs (if enabled)
+          if [ "${{ github.event.inputs.enable_eb }}" == "true" ]; then
+            echo "#### Elastic Beanstalk" >> $GITHUB_STEP_SUMMARY
+            echo "- **Application:** \`$(terraform output -raw eb_application_name)\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Environment:** \`$(terraform output -raw eb_environment_name)\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **URL:** $(terraform output -raw eb_environment_url)" >> $GITHUB_STEP_SUMMARY
+            echo "- **S3 Bucket:** \`$(terraform output -raw eb_s3_bucket)\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "#### Next Steps" >> $GITHUB_STEP_SUMMARY
+            echo "1. Run **deploy-eb.yml** workflow to deploy your application to Elastic Beanstalk" >> $GITHUB_STEP_SUMMARY
+            echo "2. Or run **deploy.yml** workflow to deploy to EKS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "#### Next Steps" >> $GITHUB_STEP_SUMMARY
+            echo "1. Run **deploy.yml** workflow to deploy your application to EKS" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Terraform Destroy Plan
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          echo "Planning Terraform destroy..."
+          terraform plan -destroy \
+            -var="enable_elastic_beanstalk=${{ github.event.inputs.enable_eb }}" \
+            -out=destroy_plan \
+            -no-color
+
+      - name: Terraform Destroy
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          echo "⚠️  Destroying infrastructure..."
+          terraform apply -auto-approve destroy_plan
+          
+          echo "### 🗑️ Infrastructure Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All infrastructure resources have been destroyed." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️  **Remember:** Run backend-setup.yml with action=destroy to clean up the backend!" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Plan Artifact
+        if: github.event.inputs.action == 'plan'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: Terraform/plan_output.txt
+          retention-days: 7
+
+      - name: Comment PR (if applicable)
+        if: github.event.inputs.action == 'plan' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('Terraform/plan_output.txt', 'utf8');
+            const truncatedPlan = plan.length > 65000 ? plan.substring(0, 65000) + '\n\n...(truncated)' : plan;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform Plan\n\`\`\`\n${truncatedPlan}\n\`\`\``
+            });

@@ -73,7 +73,7 @@ output "configure_kubectl" {
 
 output "github_actions_setup_guide" {
   description = "Instructions for setting up GitHub Actions secrets"
-  value = <<-EOT
+  value       = <<-EOT
     1. Go to GitHub repository Settings → Secrets and variables → Actions
     2. Create new repository secrets:
        - Name: AWS_ACCESS_KEY_ID
@@ -85,5 +85,39 @@ output "github_actions_setup_guide" {
        - ECR Repository: ${aws_ecr_repository.app.repository_url}
        - Region: ${var.aws_region}
   EOT
-  sensitive = true
+  sensitive   = true
+}
+
+# ========================================
+# ELASTIC BEANSTALK OUTPUTS (CONDITIONAL)
+# ========================================
+
+output "eb_application_name" {
+  description = "Elastic Beanstalk application name"
+  value       = var.enable_elastic_beanstalk ? aws_elastic_beanstalk_application.main[0].name : "Not provisioned (set enable_elastic_beanstalk=true)"
+}
+
+output "eb_environment_name" {
+  description = "Elastic Beanstalk environment name"
+  value       = var.enable_elastic_beanstalk ? aws_elastic_beanstalk_environment.main[0].name : "Not provisioned"
+}
+
+output "eb_environment_url" {
+  description = "Elastic Beanstalk environment URL"
+  value       = var.enable_elastic_beanstalk ? "http://${aws_elastic_beanstalk_environment.main[0].cname}" : "Not provisioned"
+}
+
+output "eb_cname" {
+  description = "Elastic Beanstalk CNAME"
+  value       = var.enable_elastic_beanstalk ? aws_elastic_beanstalk_environment.main[0].cname : "Not provisioned"
+}
+
+output "eb_s3_bucket" {
+  description = "S3 bucket for Elastic Beanstalk deployments"
+  value       = var.enable_elastic_beanstalk ? aws_s3_bucket.eb_deployment[0].bucket : "Not provisioned"
+}
+
+output "eb_deployment_guide" {
+  description = "Guide for deploying to Elastic Beanstalk"
+  value       = var.enable_elastic_beanstalk ? "EB enabled - see DUAL_DEPLOYMENT_GUIDE.md for deployment instructions" : "Not provisioned (set enable_elastic_beanstalk=true)"
 }
