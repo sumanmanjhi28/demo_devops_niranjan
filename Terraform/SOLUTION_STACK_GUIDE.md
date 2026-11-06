@@ -48,21 +48,26 @@ aws elasticbeanstalk list-available-solution-stacks \
 
 ### Option 3: Use Common Stable Versions
 
-Try these known stable solution stacks (as of 2024):
+Try these currently available solution stacks (as of November 2024):
 
-**Node.js 20 (Recommended):**
+**Node.js 22 (Latest - Recommended):**
 ```hcl
-eb_solution_stack = "64bit Amazon Linux 2023 v6.2.0 running Node.js 20"
+eb_solution_stack = "64bit Amazon Linux 2023 v6.12.1 running Node.js 22"
 ```
 
-**Node.js 18:**
+**Node.js 24 (Latest):**
 ```hcl
-eb_solution_stack = "64bit Amazon Linux 2023 v6.1.0 running Node.js 18"
+eb_solution_stack = "64bit Amazon Linux 2023 v6.12.1 running Node.js 24"
 ```
 
-**Node.js 16:**
+**Node.js 26 (Latest):**
 ```hcl
-eb_solution_stack = "64bit Amazon Linux 2 v5.9.0 running Node.js 16"
+eb_solution_stack = "64bit Amazon Linux 2023 v6.12.1 running Node.js 26"
+```
+
+**Node.js 12 (Legacy - Amazon Linux 2):**
+```hcl
+eb_solution_stack = "64bit Amazon Linux 2 v5.0.2 running Node.js 12"
 ```
 
 ---
@@ -156,14 +161,16 @@ Add this to your CI/CD pipeline to always use the latest:
 
 ### Amazon Linux 2023 (AL2023) - Latest
 ```
-64bit Amazon Linux 2023 v6.x.x running Node.js 20
-64bit Amazon Linux 2023 v6.x.x running Node.js 18
+64bit Amazon Linux 2023 v6.12.1 running Node.js 22
+64bit Amazon Linux 2023 v6.12.1 running Node.js 24
+64bit Amazon Linux 2023 v6.12.1 running Node.js 26
+64bit Amazon Linux 2023 v6.11.6 running Node.js 22
 ```
 
 ### Amazon Linux 2 (AL2) - Legacy
 ```
-64bit Amazon Linux 2 v5.x.x running Node.js 18
-64bit Amazon Linux 2 v5.x.x running Node.js 16
+64bit Amazon Linux 2 v5.0.2 running Node.js 12
+64bit Amazon Linux 2 v5.0.2 running Node.js 10
 ```
 
 **Recommendation:** Use Amazon Linux 2023 (AL2023) for new deployments.

@@ -16,7 +16,7 @@ eks_version   = "1.31"
 # Set to true to provision Elastic Beanstalk alongside EKS
 enable_elastic_beanstalk = false
 eb_instance_type         = "t3.micro"
-eb_solution_stack        = "64bit Amazon Linux 2023 v6.2.0 running Node.js 20"
+eb_solution_stack        = "64bit Amazon Linux 2023 v6.12.1 running Node.js 22"
 eb_min_instances         = 1
 eb_max_instances         = 2
 
